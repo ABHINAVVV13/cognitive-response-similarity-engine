@@ -29,6 +29,7 @@ Thumbs.db
 desktop.ini
 
 # Project specific
+crse_out/
 cache/
 *.ckpt
 *.pt
@@ -51,6 +52,8 @@ htmlcov/
 
 # uv
 .python-version
+uv.lock
 
 # Logs
 *.log
+.env

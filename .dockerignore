@@ -1,0 +1,23 @@
+# Git and local env (not needed in image)
+.git
+.github
+.venv
+venv
+.env
+.env.*
+
+# Python / test / tooling
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+*.egg-info
+htmlcov
+
+# Not used by RunPod worker image
+
+# IDE / OS
+.idea
+.vscode
+*.swp
+Thumbs.db

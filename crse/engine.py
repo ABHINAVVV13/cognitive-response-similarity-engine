@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from crse.brain_regions import BrainRegionManager
-from crse.similarity import ALL_METRICS, compute_all_metrics
+from crse.prediction_export import build_visualization_payload
+from crse.similarity import ALL_METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,11 @@ class ComparisonResult:
         Shape of the predicted activation for video B ``(T, V)``.
     elapsed_seconds : float
         Total wall-clock time for the comparison.
+    visualization : dict or None
+        Large RunPod payload: full ``(T,V)`` predictions as base64 npz (only when
+        requested server-side). Omitted from ``save()`` JSON.
+    surface_pngs_base64 : dict or None
+        Cortical PNGs as base64 (RunPod). Omitted from ``save()`` JSON.
     """
 
     video_a: str
@@ -77,6 +83,8 @@ class ComparisonResult:
     prediction_shape_b: tuple
     elapsed_seconds: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    visualization: Optional[Dict[str, Any]] = None
+    surface_pngs_base64: Optional[Dict[str, str]] = None
 
     # ── Human-readable summary ─────────────────────────────────────────
 
@@ -111,9 +119,13 @@ class ComparisonResult:
         lines.append("════════════════════════════════════════════════════════════════")
         return "\n".join(lines)
 
-    def to_dict(self) -> dict:
-        """Serialise to a JSON-friendly dict."""
-        return {
+    def to_dict(self, *, include_heavy: bool = True) -> dict:
+        """Serialise to a JSON-friendly dict.
+
+        ``include_heavy=False`` drops ``visualization`` and ``surface_pngs_base64``
+        (used by :meth:`save` so JSON stays small).
+        """
+        d: Dict[str, Any] = {
             "video_a": self.video_a,
             "video_b": self.video_b,
             "whole_brain": self.whole_brain,
@@ -132,14 +144,19 @@ class ComparisonResult:
             "elapsed_seconds": self.elapsed_seconds,
             "metadata": self.metadata,
         }
+        if include_heavy and self.visualization:
+            d["visualization"] = self.visualization
+        if include_heavy and self.surface_pngs_base64:
+            d["surface_pngs_base64"] = self.surface_pngs_base64
+        return d
 
-    def to_json(self, indent: int = 2) -> str:
+    def to_json(self, indent: int = 2, *, include_heavy: bool = True) -> str:
         """Serialise to a JSON string."""
-        return json.dumps(self.to_dict(), indent=indent)
+        return json.dumps(self.to_dict(include_heavy=include_heavy), indent=indent)
 
     def save(self, path: str | Path) -> None:
-        """Write results JSON to a file."""
-        Path(path).write_text(self.to_json(), encoding="utf-8")
+        """Write lean results JSON (scores + shapes only; no base64 blobs)."""
+        Path(path).write_text(self.to_json(include_heavy=False), encoding="utf-8")
         logger.info("Results saved to %s", path)
 
 
@@ -226,15 +243,34 @@ class CRSEngine:
         video_a: str | Path,
         video_b: str | Path,
         metrics: Optional[List[str]] = None,
+        *,
+        out_dir: str | Path | None = "crse_out",
+        render_brain: bool = False,
+        return_surface_pngs_base64: bool = False,
+        return_predictions_npz_b64: bool = False,
     ) -> ComparisonResult:
         """Compare two videos and return a :class:`ComparisonResult`.
+
+        By default (``out_dir`` set), writes TRIBE cortical PNGs under
+        ``{out_dir}/brain/``. With ``render_brain=True``, also exports full
+        ``(T,V)`` series and a WebGL viewer under ``{out_dir}/viewer/`` (serve
+        that folder over HTTP to open ``index.html``).
 
         Parameters
         ----------
         video_a, video_b : str or Path
-            Paths to the two video files to compare.
+            Paths or URLs to the two videos.
         metrics : list[str] or None
-            Subset of metric names to compute.  ``None`` = all metrics.
+            Subset of metric names.  ``None`` = all.
+        out_dir : str, Path, or None
+            Output root. ``None`` skips all disk outputs (RunPod worker).
+        render_brain : bool
+            Export interactive 3D viewer + raw series binaries under ``viewer/``.
+        return_surface_pngs_base64 : bool
+            If True, add ``surface_pngs_base64`` on the result (RunPod).
+        return_predictions_npz_b64 : bool
+            If True, add ``visualization`` with full predictions as base64 npz
+            (large; RunPod when ``render_brain``).
 
         Returns
         -------
@@ -242,9 +278,28 @@ class CRSEngine:
         """
         t0 = time.time()
 
-        # 1. Predict
-        preds_a = self.predict(video_a)
-        preds_b = self.predict(video_b)
+        # 1. Predict (Handles web URLs and YouTube native downloads)
+        from crse.downloader import download_video, is_url
+        import tempfile
+        import os
+        
+        with tempfile.TemporaryDirectory(prefix="crse_local_") as tmp_dir:
+            if isinstance(video_a, str) and is_url(video_a):
+                logger.info("Video A is a URL, downloading to temporary storage...")
+                video_a_path = download_video(video_a, tmp_dir)
+            else:
+                video_a_path = video_a
+                
+            if isinstance(video_b, str) and is_url(video_b):
+                logger.info("Video B is a URL, downloading to temporary storage...")
+                video_b_dest = os.path.join(tmp_dir, "video_b")
+                os.makedirs(video_b_dest, exist_ok=True)
+                video_b_path = download_video(video_b, video_b_dest)
+            else:
+                video_b_path = video_b
+
+            preds_a = self.predict(video_a_path)
+            preds_b = self.predict(video_b_path)
 
         # 2. Select metrics
         metric_fns = ALL_METRICS
@@ -290,6 +345,46 @@ class CRSEngine:
 
         elapsed = time.time() - t0
 
+        visualization = None
+        if return_predictions_npz_b64:
+            visualization = build_visualization_payload(
+                preds_a,
+                preds_b,
+                "npz_b64",
+                max_timesteps_npz=None,
+            )
+
+        mean_a = np.nanmean(preds_a, axis=0)
+        mean_b = np.nanmean(preds_b, axis=0)
+
+        surface_b64: Optional[Dict[str, str]] = None
+        if return_surface_pngs_base64:
+            try:
+                from crse.tribe_plot import encode_mean_surface_pngs_base64
+
+                surface_b64 = encode_mean_surface_pngs_base64(mean_a, mean_b)
+            except ImportError as exc:
+                logger.warning("surface PNGs (base64) skipped: %s", exc)
+                surface_b64 = {"_error": str(exc)}
+
+        if out_dir is not None:
+            brain_dir = Path(out_dir) / "brain"
+            brain_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                from crse.tribe_plot import save_mean_surface_figures
+
+                save_mean_surface_figures(mean_a, mean_b, brain_dir)
+            except ImportError as exc:
+                logger.warning("Brain PNGs not written to %s: %s", brain_dir, exc)
+
+        if render_brain and out_dir is not None:
+            from crse.brain_viewer_export import export_interactive_viewer
+
+            try:
+                export_interactive_viewer(Path(out_dir) / "viewer", preds_a, preds_b)
+            except Exception as exc:
+                logger.warning("Interactive viewer export failed: %s", exc)
+
         return ComparisonResult(
             video_a=str(video_a),
             video_b=str(video_b),
@@ -304,6 +399,8 @@ class CRSEngine:
                 "n_metrics": len(metric_fns),
                 "n_regions": len(region_scores),
             },
+            visualization=visualization,
+            surface_pngs_base64=surface_b64,
         )
 
 

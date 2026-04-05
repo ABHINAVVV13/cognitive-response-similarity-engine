@@ -1,38 +1,25 @@
 """
 RunPod Serverless Handler for CRSE.
 
-This handler runs on a GPU worker. It accepts two video URLs,
-downloads them, runs TRIBE v2 brain encoding, computes similarity,
-and returns the full ComparisonResult as JSON.
-
-Deploy as a RunPod serverless endpoint via Docker.
-
-Input schema (job["input"])::
+Input (job["input"])::
 
     {
-        "video_a_url": "https://example.com/video_a.mp4",
-        "video_b_url": "https://example.com/video_b.mp4",
-        "regions": ["emotional_limbic", "visual_cortex"],  // optional
-        "metrics": ["cosine_similarity", "pearson_correlation"]  // optional
+        "video_a_url": "https://...",
+        "video_b_url": "https://...",
+        "regions": [...],       // optional
+        "metrics": [...],       // optional
+        "render_brain": false  // optional; large npz_b64 + same as CLI --render-brain
     }
 
-Output::
-
-    {
-        "video_a": "/tmp/video_a.mp4",
-        "video_b": "/tmp/video_b.mp4",
-        "whole_brain": { ... },
-        "regions": [ ... ],
-        ...
-    }
+Every job returns similarity scores plus ``surface_pngs_base64`` (cortical PNGs).
+When ``render_brain`` is true, ``visualization`` contains full (T,V) predictions
+(base64 npz) — very large.
 """
 
 import logging
 import os
 import tempfile
 import time
-from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 import runpod
@@ -43,10 +30,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("crse.runpod")
-
-# ───────────────────────────────────────────────────────────────────────────
-# Global model loading — happens ONCE during cold start, not per-request
-# ───────────────────────────────────────────────────────────────────────────
 
 MODEL_ID = os.environ.get("CRSE_MODEL_ID", "facebook/tribev2")
 CACHE_DIR = os.environ.get("CRSE_CACHE_DIR", "/cache")
@@ -60,39 +43,15 @@ ENGINE = CRSEngine(
     cache_folder=CACHE_DIR,
     device=DEVICE,
 )
-# Force model load during cold start so first request is fast
 ENGINE._ensure_model()
 logger.info("CRSE engine ready.")
 
-
-# ───────────────────────────────────────────────────────────────────────────
-# Helpers
-# ───────────────────────────────────────────────────────────────────────────
+from crse.downloader import download_video  # noqa: E402
 
 
-def download_video(url: str, dest_dir: str) -> str:
-    """Download a video from a URL to a local file. Returns local path."""
-    parsed = urlparse(url)
-    filename = Path(parsed.path).name or "video.mp4"
-    # Ensure valid video extension
-    if not any(filename.endswith(ext) for ext in (".mp4", ".avi", ".mkv", ".mov", ".webm")):
-        filename += ".mp4"
-    local_path = os.path.join(dest_dir, filename)
-
-    logger.info("Downloading %s → %s", url, local_path)
-    with requests.get(url, stream=True, timeout=120) as r:
-        r.raise_for_status()
-        with open(local_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=256 * 1024):
-                if chunk:
-                    f.write(chunk)
-    file_size = os.path.getsize(local_path)
-    logger.info("Downloaded %s (%.1f MB)", filename, file_size / 1e6)
-    return local_path
-
-
-def validate_input(job_input: dict) -> tuple[str, str, list | None, list | None]:
-    """Validate and extract input parameters."""
+def validate_input(
+    job_input: dict,
+) -> tuple[str, str, list | None, list | None, bool]:
     video_a_url = job_input.get("video_a_url")
     video_b_url = job_input.get("video_b_url")
 
@@ -104,46 +63,36 @@ def validate_input(job_input: dict) -> tuple[str, str, list | None, list | None]
 
     regions = job_input.get("regions", None)
     metrics = job_input.get("metrics", None)
+    render_brain = job_input.get("render_brain", False)
 
     if regions is not None and not isinstance(regions, list):
         raise ValueError(f"'regions' must be a list of strings, got {type(regions)}")
     if metrics is not None and not isinstance(metrics, list):
         raise ValueError(f"'metrics' must be a list of strings, got {type(metrics)}")
+    if not isinstance(render_brain, bool):
+        raise ValueError(f"'render_brain' must be a boolean, got {type(render_brain).__name__}")
 
-    return video_a_url, video_b_url, regions, metrics
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# RunPod handler
-# ───────────────────────────────────────────────────────────────────────────
+    return (video_a_url, video_b_url, regions, metrics, render_brain)
 
 
 def handler(job: dict) -> dict:
-    """
-    Process a CRSE comparison job.
-
-    Downloads two videos from URLs, runs TRIBE v2 predictions,
-    computes similarity metrics, returns results as JSON dict.
-    """
     job_input = job.get("input", {})
     t0 = time.time()
 
     try:
-        video_a_url, video_b_url, regions, metrics = validate_input(job_input)
+        video_a_url, video_b_url, regions, metrics, render_brain = validate_input(job_input)
     except ValueError as e:
         return {"error": str(e)}
 
-    # Override engine regions if specified
     if regions:
         ENGINE._regions = regions
-        ENGINE._brain_mgr = __import__("crse.brain_regions", fromlist=["BrainRegionManager"]).BrainRegionManager()
+        ENGINE._brain_mgr = __import__(
+            "crse.brain_regions", fromlist=["BrainRegionManager"]
+        ).BrainRegionManager()
 
-    # Download videos to temp directory
     with tempfile.TemporaryDirectory(prefix="crse_") as tmp_dir:
         try:
-            # Use unique names to avoid collision
             video_a_path = download_video(video_a_url, tmp_dir)
-            # Ensure video B has a different name if URLs have same filename
             video_b_dest = os.path.join(tmp_dir, "video_b")
             os.makedirs(video_b_dest, exist_ok=True)
             video_b_path = download_video(video_b_url, video_b_dest)
@@ -152,15 +101,18 @@ def handler(job: dict) -> dict:
 
         try:
             result = ENGINE.compare(
-                video_a=video_a_path,
-                video_b=video_b_path,
+                video_a_path,
+                video_b_path,
                 metrics=metrics,
+                out_dir=None,
+                render_brain=False,
+                return_surface_pngs_base64=True,
+                return_predictions_npz_b64=render_brain,
             )
         except Exception as e:
             logger.exception("CRSE comparison failed")
             return {"error": f"Comparison failed: {str(e)}"}
 
-    # Convert to dict for JSON serialization
     output = result.to_dict()
     output["total_time_seconds"] = round(time.time() - t0, 2)
     output["worker_device"] = DEVICE
@@ -172,10 +124,6 @@ def handler(job: dict) -> dict:
     )
     return output
 
-
-# ───────────────────────────────────────────────────────────────────────────
-# Start the RunPod serverless worker
-# ───────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})

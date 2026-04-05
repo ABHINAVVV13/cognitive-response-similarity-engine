@@ -14,7 +14,7 @@ Quick start::
     from crse import CRSEngine
 
     engine = CRSEngine()
-    result = engine.compare("video_a.mp4", "video_b.mp4")
+    result = engine.compare("a.mp4", "b.mp4", out_dir="crse_out")  # + brain/*.png
     print(result.summary())
 """
 

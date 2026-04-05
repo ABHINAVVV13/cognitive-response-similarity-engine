@@ -3,7 +3,7 @@
 # ============================================================================
 # Builds a GPU-ready container with TRIBE v2 + CRSE pre-installed.
 #
-# Build:
+# Build (repo root):
 #   docker build -t crse-worker:latest -f runpod/Dockerfile .
 #
 # Test locally:
@@ -13,6 +13,12 @@
 # Push to registry:
 #   docker tag crse-worker:latest <your-registry>/crse-worker:latest
 #   docker push <your-registry>/crse-worker:latest
+#
+# Notes:
+# - README.md must be copied: pyproject.toml has readme = "README.md" (hatchling).
+# - Handler is copied *after* pip install so editing handler.py alone reuses the
+#   heavy install layer (BuildKit layer cache).
+# - Set HF_TOKEN on the RunPod template so gated Hugging Face models can download.
 # ============================================================================
 
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
@@ -27,24 +33,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Install uv ────────────────────────────────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Tell uv to install into the system Python (no venv in Docker)
 ENV UV_SYSTEM_PYTHON=1
 
 WORKDIR /app
 
-# ── Install TRIBE v2 ──────────────────────────────────────────────────
-RUN git clone https://github.com/facebookresearch/tribev2.git /app/tribev2 \
-    && uv pip install -e /app/tribev2
+# ── TRIBE v2 (heavy); separate layer caches when only CRSE code changes ──
+# TRIBE's default path runs `uvx whisperx`, which re-downloads PyTorch/CUDA into
+# ~/.cache/uv on every cold worker and often exhausts RunPod's small root disk.
+# We patch TRIBE to call the `whisperx` CLI and install whisperx into this image.
+RUN git clone --depth 1 https://github.com/facebookresearch/tribev2.git /app/tribev2
 
-# ── Install CRSE dependencies ─────────────────────────────────────────
-COPY pyproject.toml .
+COPY runpod/patch_tribev2_whisperx.py /tmp/patch_tribev2_whisperx.py
+RUN python /tmp/patch_tribev2_whisperx.py
+
+RUN uv pip install -e /app/tribev2 \
+    && uv pip install whisperx
+
+# ── CRSE package metadata + source (handler copied later on purpose) ───
+COPY pyproject.toml README.md .
 COPY crse/ crse/
+
+# runpod + tribe-plot: cortical PNGs (surface_pngs_base64) on every job
+RUN uv pip install -e ".[runpod,tribe-plot]"
+
 COPY runpod/handler.py runpod/handler.py
 
-RUN uv pip install -e . \
-    && uv pip install runpod requests
-
-# ── Install spaCy language model ───────────────────────────────────────
+# ── spaCy model (TRIBE / pipeline) ──────────────────────────────────────
 RUN python -m spacy download en_core_web_sm
 
 # ── Pre-download HuggingFace model weights (optional) ──────────────────
@@ -61,14 +75,19 @@ RUN python -m spacy download en_core_web_sm
 # "
 
 # ── Cache and tmp directories ──────────────────────────────────────────
-RUN mkdir -p /cache /tmp/crse
+# Keep Hugging Face + uv caches on /cache so they share the same volume as CRSE
+# and do not fill /root (Whisper large-v3 alone is ~3GB; TRIBE adds more).
+RUN mkdir -p /cache/huggingface /cache/uv /tmp/crse
 ENV CRSE_CACHE_DIR="/cache"
+ENV HF_HOME="/cache/huggingface"
+ENV HUGGINGFACE_HUB_CACHE="/cache/huggingface"
+ENV TRANSFORMERS_CACHE="/cache/huggingface"
+ENV UV_CACHE_DIR="/cache/uv"
 ENV CRSE_DEVICE="auto"
 ENV CRSE_MODEL_ID="facebook/tribev2"
 
-# ── Healthcheck ────────────────────────────────────────────────────────
+# Lightweight check (does not load TRIBE weights; worker loads them at startup)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
     CMD python -c "import crse; print('ok')" || exit 1
 
-# ── Run the handler ────────────────────────────────────────────────────
 CMD ["python", "-u", "runpod/handler.py"]
