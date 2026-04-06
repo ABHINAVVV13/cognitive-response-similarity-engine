@@ -93,11 +93,25 @@ r = CRSERunPodClient().compare("https://...", "https://...", render_brain=False)
 
 ## What you get
 
-| Always | With `--render-brain` |
-|--------|------------------------|
-| Similarity tables (whole-brain + regions) | Same |
-| `OUT_DIR/brain/mean_a.png`, `mean_b.png`, `mean_diff_a_minus_b.png` | Same |
-| | `OUT_DIR/viewer/` — WebGL surface, scrub time, pick video A or B |
+
+| Always                                                              | With `--render-brain`                                            |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Similarity tables (whole-brain + regions)                           | Same                                                             |
+| `OUT_DIR/brain/mean_a.png`, `mean_b.png`, `mean_diff_a_minus_b.png` | Same                                                             |
+|                                                                     | `OUT_DIR/viewer/`: WebGL surface, scrub time, pick video A or B |
+
+
+### Demo example (cortical maps + scores)
+
+After `crse compare`, the same figures live under `crse_out/brain/` (or your `--out-dir/brain/`). Below is one real run: two demo videos (voice vs music), **left-hemisphere** time-mean surfaces and **A - B** difference, plus a **terminal** snapshot of whole-brain and per-region similarity.
+
+| Mean map (video A) | Mean map (video B) |
+| ------------------ | ------------------ |
+| ![Time-mean cortical map for video A](./docs/demo/brain/mean_a.png) | ![Time-mean cortical map for video B](./docs/demo/brain/mean_b.png) |
+
+| Difference **A - B** | Similarity tables (excerpt) |
+| -------------------- | ---------------------------- |
+| ![Mean activation difference A minus B](./docs/demo/brain/mean_diff_a_minus_b.png) | ![CLI similarity output](./docs/demo/brain/image.png) |
 
 ---
 
