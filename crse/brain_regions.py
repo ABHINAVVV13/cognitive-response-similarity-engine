@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -122,6 +123,11 @@ class BrainRegionManager:
     def _atlas(self):
         """Fetch the Destrieux atlas via nilearn (downloaded once, cached)."""
         from nilearn import datasets
+
+        data_dir = os.environ.get("NILEARN_DATA", "").strip()
+        if data_dir:
+            data_dir = os.path.expanduser(data_dir)
+            return datasets.fetch_atlas_surf_destrieux(data_dir=data_dir)
         return datasets.fetch_atlas_surf_destrieux()
 
     def _ensure_loaded(self) -> None:

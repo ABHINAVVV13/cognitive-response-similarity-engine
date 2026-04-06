@@ -24,6 +24,19 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _configure_headless_plotting() -> None:
+    """RunPod / Docker have no X11; VTK must use EGL/OSMesa (see runpod/Dockerfile)."""
+    import os
+
+    os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+    try:
+        import pyvista as pv
+
+        pv.OFF_SCREEN = True
+    except ImportError:
+        pass
+
+
 def _require_plotting_stack() -> None:
     try:
         import pyvista  # noqa: F401
@@ -80,6 +93,7 @@ def encode_mean_surface_pngs_base64(
     dpi: int = 110,
 ) -> Dict[str, str]:
     """Render TRIBE surface PNGs in memory; return filename stem → standard base64."""
+    _configure_headless_plotting()
     _require_plotting_stack()
     from tribev2.plotting import PlotBrain
 
@@ -110,8 +124,8 @@ def save_mean_surface_figures(
     mean_a, mean_b
         1D arrays, length = number of fsaverage vertices (LH+RH), TRIBE order.
     """
+    _configure_headless_plotting()
     _require_plotting_stack()
-    from matplotlib import pyplot as plt
     from tribev2.plotting import PlotBrain
 
     out_dir = Path(out_dir)

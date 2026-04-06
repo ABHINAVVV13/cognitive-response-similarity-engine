@@ -98,6 +98,10 @@ def handler(job: dict) -> dict:
             video_b_path = download_video(video_b_url, video_b_dest)
         except requests.RequestException as e:
             return {"error": f"Failed to download video: {str(e)}"}
+        except Exception as e:
+            # yt-dlp DownloadError, merge failures, disk full, etc.
+            logger.exception("Video download failed")
+            return {"error": f"Failed to download video: {str(e)}"}
 
         try:
             result = ENGINE.compare(
@@ -116,6 +120,21 @@ def handler(job: dict) -> dict:
     output = result.to_dict()
     output["total_time_seconds"] = round(time.time() - t0, 2)
     output["worker_device"] = DEVICE
+
+    sp = result.surface_pngs_base64
+    if isinstance(sp, dict):
+        png_keys = [k for k in sp if not str(k).startswith("_")]
+        logger.info(
+            "surface_pngs_base64: %d map(s)%s",
+            len(png_keys),
+            f" ({', '.join(png_keys)})" if png_keys else " — check _error or tribe-plot/GL",
+        )
+    if result.visualization:
+        logger.info(
+            "visualization: schema=%s timesteps=%s",
+            result.visualization.get("schema"),
+            result.visualization.get("n_timesteps_used"),
+        )
 
     logger.info(
         "Job complete in %.1fs — whole-brain cosine: %.4f",

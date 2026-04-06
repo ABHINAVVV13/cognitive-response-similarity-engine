@@ -24,10 +24,15 @@
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 # ── System dependencies ────────────────────────────────────────────────
+# libosmesa6 + libegl1-mesa: VTK/PyVista headless rendering (no X11 on RunPod).
+# Without these, cortical PNG encoding segfaults after "libOSMesa not found".
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     curl \
+    libgl1 \
+    libegl1-mesa \
+    libosmesa6 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install uv ────────────────────────────────────────────────────────
@@ -58,8 +63,9 @@ RUN uv pip install -e ".[runpod,tribe-plot]"
 
 COPY runpod/handler.py runpod/handler.py
 
-# ── spaCy model (TRIBE / pipeline) ──────────────────────────────────────
-RUN python -m spacy download en_core_web_sm
+# ── spaCy models (TRIBE pulls en_core_web_lg at runtime if missing — bake it) ──
+RUN python -m spacy download en_core_web_sm \
+    && python -m spacy download en_core_web_lg
 
 # ── Pre-download HuggingFace model weights (optional) ──────────────────
 # Uncomment the lines below to bake model weights into the image.
@@ -77,14 +83,28 @@ RUN python -m spacy download en_core_web_sm
 # ── Cache and tmp directories ──────────────────────────────────────────
 # Keep Hugging Face + uv caches on /cache so they share the same volume as CRSE
 # and do not fill /root (Whisper large-v3 alone is ~3GB; TRIBE adds more).
-RUN mkdir -p /cache/huggingface /cache/uv /tmp/crse
+RUN mkdir -p /cache/huggingface /cache/uv /cache/nilearn_data /tmp/crse
 ENV CRSE_CACHE_DIR="/cache"
 ENV HF_HOME="/cache/huggingface"
 ENV HUGGINGFACE_HUB_CACHE="/cache/huggingface"
 ENV TRANSFORMERS_CACHE="/cache/huggingface"
 ENV UV_CACHE_DIR="/cache/uv"
+ENV NILEARN_DATA="/cache/nilearn_data"
+# Truncate full (T,V) npz in API output so RunPod JSON (~2MB cap) can still succeed with --render-brain
+ENV CRSE_MAX_NPZ_TIMESTEPS="24"
 ENV CRSE_DEVICE="auto"
 ENV CRSE_MODEL_ID="facebook/tribev2"
+ENV PYVISTA_OFF_SCREEN="true"
+
+# Fail the image build if headless cortical PNGs do not work (OSMesa/EGL + PyVista).
+RUN PYVISTA_OFF_SCREEN=true python -c "\
+import numpy as np; \
+from crse.tribe_plot import encode_mean_surface_pngs_base64; \
+r = np.random.default_rng(0).standard_normal(20484).astype('float64'); \
+b = encode_mean_surface_pngs_base64(r, r); \
+assert all(k in b for k in ('mean_a', 'mean_b', 'mean_diff_a_minus_b')); \
+assert min(len(b[k]) for k in b) > 500; \
+print('headless cortical PNG smoke OK')"
 
 # Lightweight check (does not load TRIBE weights; worker loads them at startup)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \

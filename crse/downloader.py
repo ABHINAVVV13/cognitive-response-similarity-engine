@@ -46,7 +46,17 @@ def download_video(url: str, dest_dir: str) -> str:
             'quiet': True,
             'no_warnings': True,
         }
-        
+        # Optional 403/datacenter workaround: alternate Innertube clients (off by default).
+        # Set CRSE_YTDLP_PLAYER_CLIENT_WORKAROUND=1 on the worker if you need it.
+        if os.environ.get("CRSE_YTDLP_PLAYER_CLIENT_WORKAROUND", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            ydl_opts["extractor_args"] = {
+                "youtube": {"player_client": ["android", "web"]},
+            }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             logger.info("Fetching YouTube media (capped at 720p) via yt-dlp...")
             info = ydl.extract_info(url, download=True)

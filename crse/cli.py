@@ -85,7 +85,7 @@ def compare(
     render_brain,
     verbose,
 ):
-    """Compare two videos (local paths or URLs). Always writes cortical PNGs under OUT_DIR/brain/."""
+    """Compare two videos (local paths or URLs). Local run writes PNGs under OUT_DIR/brain/; RunPod needs worker support."""
     _setup_logging(verbose)
     out_path = Path(out_dir)
     region_list = list(regions) if regions else None
@@ -105,6 +105,9 @@ def compare(
     console.print(f"  [dim]Video B:[/]  {video_b}")
     console.print(f"  [dim]Out:[/]      {out_path.resolve()}")
     console.print()
+
+    wrote_brain_pngs = False
+    wrote_viewer = False
 
     if runpod:
         from crse.brain_viewer_export import export_interactive_viewer, load_predictions_from_visualization_dict
@@ -136,6 +139,7 @@ def compare(
         b64_map = raw.get("surface_pngs_base64")
         err_msg = b64_map.get("_error") if isinstance(b64_map, dict) else None
         written = save_surface_pngs_from_result(raw, brain_dir)
+        wrote_brain_pngs = bool(written)
         if err_msg:
             console.print(f"[yellow]Warning:[/] [dim]Brain PNGs: {err_msg}[/]")
         elif not written:
@@ -153,6 +157,7 @@ def compare(
             else:
                 try:
                     export_interactive_viewer(out_path / "viewer", pair[0], pair[1])
+                    wrote_viewer = True
                 except Exception as e:
                     console.print(f"[yellow]Warning:[/] [dim]Viewer export failed: {e}[/]")
 
@@ -194,6 +199,11 @@ def compare(
                 out_dir=out_path,
                 render_brain=render_brain,
             )
+        brain_dir = out_path / "brain"
+        wrote_brain_pngs = brain_dir.is_dir() and any(brain_dir.glob("*.png"))
+        if render_brain:
+            vd = out_path / "viewer"
+            wrote_viewer = vd.is_dir() and any(vd.iterdir())
 
     wb_table = Table(
         title="Whole-Brain Similarity",
@@ -249,12 +259,22 @@ def compare(
         console.print()
 
     console.print(f"  [dim]Time[/] [bold bright_cyan]{result.elapsed_seconds:.1f}s[/]")
-    console.print(f"  [dim]Brain PNGs[/] [bright_green]{out_path / 'brain'}[/]")
-    if render_brain:
+    if wrote_brain_pngs:
+        console.print(f"  [dim]Brain PNGs[/] [bright_green]{out_path / 'brain'}[/]")
+    else:
         console.print(
-            f"  [dim]3D viewer[/] [bright_green]{out_path / 'viewer'}[/] "
-            "[dim]→ cd viewer && python -m http.server 8765[/]"
+            f"  [dim]Brain PNGs[/] [yellow]none written[/] [dim]({out_path / 'brain'})[/]"
         )
+    if render_brain:
+        if wrote_viewer:
+            console.print(
+                f"  [dim]3D viewer[/] [bright_green]{out_path / 'viewer'}[/] "
+                "[dim]→ cd viewer && python -m http.server 8765[/]"
+            )
+        else:
+            console.print(
+                f"  [dim]3D viewer[/] [yellow]not exported[/] [dim]({out_path / 'viewer'})[/]"
+            )
     console.print()
 
     if output:

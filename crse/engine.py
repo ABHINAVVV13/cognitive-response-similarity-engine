@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -281,8 +282,7 @@ class CRSEngine:
         # 1. Predict (Handles web URLs and YouTube native downloads)
         from crse.downloader import download_video, is_url
         import tempfile
-        import os
-        
+
         with tempfile.TemporaryDirectory(prefix="crse_local_") as tmp_dir:
             if isinstance(video_a, str) and is_url(video_a):
                 logger.info("Video A is a URL, downloading to temporary storage...")
@@ -347,11 +347,15 @@ class CRSEngine:
 
         visualization = None
         if return_predictions_npz_b64:
+            max_t = os.environ.get("CRSE_MAX_NPZ_TIMESTEPS", "").strip()
+            max_timesteps_npz: Optional[int] = None
+            if max_t.isdigit():
+                max_timesteps_npz = int(max_t)
             visualization = build_visualization_payload(
                 preds_a,
                 preds_b,
                 "npz_b64",
-                max_timesteps_npz=None,
+                max_timesteps_npz=max_timesteps_npz,
             )
 
         mean_a = np.nanmean(preds_a, axis=0)
@@ -365,6 +369,9 @@ class CRSEngine:
                 surface_b64 = encode_mean_surface_pngs_base64(mean_a, mean_b)
             except ImportError as exc:
                 logger.warning("surface PNGs (base64) skipped: %s", exc)
+                surface_b64 = {"_error": str(exc)}
+            except Exception as exc:
+                logger.exception("surface PNGs (base64) failed (headless GL / VTK)")
                 surface_b64 = {"_error": str(exc)}
 
         if out_dir is not None:
